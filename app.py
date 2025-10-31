@@ -1,5 +1,5 @@
 import os
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, render_template, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from passlib.hash import sha256_crypt
@@ -8,9 +8,9 @@ import jwt
 from functools import wraps
 from datetime import datetime, timedelta
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your_secret_key' # Change this in a real app
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'mysql+pymysql://web_app_user:password@localhost/web_security_app')
+app = Flask(__name__, static_folder='static', template_folder='templates')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -263,10 +263,13 @@ def update_user(current_user, id):
 @token_required
 @admin_required
 def get_payroll(current_user):
-    # Also, you would likely want to filter by a specific pay period
+    from datetime import datetime, timedelta
+    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
 
-    # For simplicity, we'll calculate payroll for all time logs
-    time_logs = TimeLog.query.filter(TimeLog.clock_out != None).all()
+    time_logs = TimeLog.query.filter(
+        TimeLog.clock_out != None,
+        TimeLog.clock_in >= thirty_days_ago
+    ).all()
 
     payroll_data = {}
     hourly_rate = 20 # Fixed hourly rate for all staff
@@ -292,7 +295,13 @@ def get_payroll(current_user):
 @token_required
 @admin_required
 def get_payroll_pdf(current_user):
-    time_logs = TimeLog.query.filter(TimeLog.clock_out != None).all()
+    from datetime import datetime, timedelta
+    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+
+    time_logs = TimeLog.query.filter(
+        TimeLog.clock_out != None,
+        TimeLog.clock_in >= thirty_days_ago
+    ).all()
 
     payroll_data = {}
     hourly_rate = 20 # Fixed hourly rate for all staff
@@ -336,8 +345,8 @@ def get_payroll_pdf(current_user):
     return response
 
 @app.route('/api/transaction', methods=['POST'])
-def api_add_transaction():
-    # In a real app, you would add API key authentication here
+@token_required
+def api_add_transaction(current_user):
     data = request.get_json()
     amount = data.get('amount')
     location = data.get('location')
@@ -410,6 +419,30 @@ def clock_out(current_user):
 
     return jsonify({'message': 'Clocked out successfully'}), 200
 
+# Frontend Routes
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/login')
+def login_page():
+    return render_template('login.html')
+
+@app.route('/register')
+def register_page():
+    return render_template('register.html')
+
+@app.route('/staff')
+def staff_page():
+    return render_template('staff.html')
+
+@app.route('/admin')
+def admin_page():
+    return render_template('admin.html')
+
+@app.route('/static/<path:path>')
+def send_static(path):
+    return send_from_directory('static', path)
 
 if __name__ == '__main__':
     app.run(debug=True)
