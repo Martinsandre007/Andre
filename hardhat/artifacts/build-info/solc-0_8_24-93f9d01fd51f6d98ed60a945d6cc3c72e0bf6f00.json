@@ -1,0 +1,35 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_24-93f9d01fd51f6d98ed60a945d6cc3c72e0bf6f00",
+  "solcVersion": "0.8.24",
+  "solcLongVersion": "0.8.24+commit.e11b9ed9",
+  "userSourceNameMap": {
+    "contracts/Ticket.sol": "project/contracts/Ticket.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "shanghai",
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode",
+            "evm.deployedBytecode",
+            "evm.methodIdentifiers",
+            "metadata"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/Ticket.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n\ncontract EventTicketing {\n    struct Event {\n        address organizer;\n        string name;\n        uint256 ticketPrice;\n        uint256 totalTickets;\n        uint256 soldTickets;\n        mapping(address => uint256) ticketsOwned;\n    }\n\n    uint256 public nextEventId;\n    mapping(uint256 => Event) public events;\n\n    function createEvent(string memory _name, uint256 _ticketPrice, uint256 _totalTickets) external {\n        Event storage newEvent = events[nextEventId];\n        newEvent.organizer = msg.sender;\n        newEvent.name = _name;\n        newEvent.ticketPrice = _ticketPrice;\n        newEvent.totalTickets = _totalTickets;\n        // soldTickets is 0 by default, but it's good to be explicit\n        newEvent.soldTickets = 0;\n        nextEventId++;\n    }\n\n    function buyTickets(uint256 _eventId, uint256 _quantity) external payable {\n        Event storage _event = events[_eventId];\n        require(msg.value == _event.ticketPrice * _quantity, \"Incorrect amount of ether sent\");\n        require(_event.soldTickets + _quantity <= _event.totalTickets, \"Not enough tickets available\");\n\n        _event.soldTickets += _quantity;\n        _event.ticketsOwned[msg.sender] += _quantity;\n    }\n\n    function getMyTickets(uint256 _eventId) external view returns (uint256) {\n        return events[_eventId].ticketsOwned[msg.sender];\n    }\n}\n"
+      }
+    }
+  }
+}
