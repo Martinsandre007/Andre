@@ -3,7 +3,7 @@ import { ethers } from 'ethers';
 import './App.css';
 import EventTicketing from './EventTicketing.json'; // The ABI
 
-const contractAddress = "YOUR_CONTRACT_ADDRESS"; // Placeholder
+const contractAddress = "0x3a35b766A2c45F1A9DD1E2ef581F8fa2A7B977Ae"; // Placeholder
 
 function App() {
   const [provider, setProvider] = useState(null);
