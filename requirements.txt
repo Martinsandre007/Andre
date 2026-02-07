@@ -6,3 +6,5 @@ fpdf2
 pyjwt
 pymysql
 cryptography
+eth-account
+pysui

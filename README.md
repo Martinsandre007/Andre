@@ -5,6 +5,8 @@ A Flask-based management system for transactions, payroll, and time logging.
 ## Security Features
 - JWT-based authentication for users.
 - Role-based access control (Admin/Staff).
+- Web3 Authentication: MetaMask (Ethereum) and Enkrypt (Sui) support.
+- Sui zkLogin support.
 - API key authentication for external transaction sources.
 - Protected registration (default role is 'staff').
 

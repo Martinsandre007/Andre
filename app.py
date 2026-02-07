@@ -1,10 +1,15 @@
 import os
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from passlib.hash import sha256_crypt
 from fpdf import FPDF
 import jwt
+import secrets
+import base64
+from eth_account.messages import encode_defunct
+from eth_account import Account
+import pysui_fastcrypto
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +26,9 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(128))
     role = db.Column(db.String(20), nullable=False, default='staff')
+    eth_address = db.Column(db.String(42), unique=True, nullable=True)
+    sui_address = db.Column(db.String(66), unique=True, nullable=True)
+    nonce = db.Column(db.String(100), nullable=True)
 
     def set_password(self, password):
         self.password_hash = sha256_crypt.hash(password)
@@ -53,6 +61,10 @@ class TimeLog(db.Model):
     user = db.relationship('User', backref=db.backref('timelogs', lazy=True))
     clock_in = db.Column(db.DateTime, nullable=False, default=db.func.current_timestamp())
     clock_out = db.Column(db.DateTime)
+
+@app.route('/')
+def index():
+    return render_template('login.html')
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -89,6 +101,106 @@ def login():
 
     if user is None or not user.check_password(password):
         return jsonify({'message': 'Invalid username or password'}), 401
+
+    token = jwt.encode({
+        'user_id': user.id,
+        'role': user.role,
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=30)
+    }, app.config['SECRET_KEY'])
+
+    return jsonify({'token': token})
+
+@app.route('/api/nonce', methods=['POST'])
+def get_nonce():
+    data = request.get_json()
+    address = data.get('address')
+    if not address:
+        return jsonify({'message': 'Address is required'}), 400
+
+    nonce = secrets.token_hex(16)
+
+    # Check if user exists, if not create one to store the nonce
+    user = User.query.filter((User.eth_address == address) | (User.sui_address == address)).first()
+    if not user:
+        if address.startswith('0x') and len(address) == 42:
+            username = f"eth_{address[:8]}_{secrets.token_hex(4)}"
+            user = User(username=username, eth_address=address, role='staff')
+        else:
+            username = f"sui_{address[:8]}_{secrets.token_hex(4)}"
+            user = User(username=username, sui_address=address, role='staff')
+        db.session.add(user)
+
+    user.nonce = nonce
+    db.session.commit()
+
+    return jsonify({'nonce': nonce})
+
+@app.route('/api/login/ethereum', methods=['POST'])
+def login_ethereum():
+    data = request.get_json()
+    address = data.get('address')
+    signature = data.get('signature')
+    nonce = data.get('nonce')
+
+    if not all([address, signature, nonce]):
+        return jsonify({'message': 'Missing required fields'}), 400
+
+    message = f"Sign this message to authenticate: {nonce}"
+    encoded_message = encode_defunct(text=message)
+
+    try:
+        recovered_address = Account.recover_message(encoded_message, signature=signature)
+    except Exception as e:
+        return jsonify({'message': f'Invalid signature format: {str(e)}'}), 400
+
+    user = User.query.filter_by(eth_address=address).first()
+    if not user or user.nonce != nonce:
+        return jsonify({'message': 'Invalid nonce'}), 401
+
+    if recovered_address.lower() != address.lower():
+        return jsonify({'message': 'Invalid signature'}), 401
+
+    token = jwt.encode({
+        'user_id': user.id,
+        'role': user.role,
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=30)
+    }, app.config['SECRET_KEY'])
+
+    return jsonify({'token': token})
+
+@app.route('/api/login/sui', methods=['POST'])
+def login_sui():
+    data = request.get_json()
+    address = data.get('address')
+    signature_b64 = data.get('signature')
+    nonce = data.get('nonce')
+    pubkey_b64 = data.get('pubkey')
+
+    if not all([address, signature_b64, nonce, pubkey_b64]):
+        return jsonify({'message': 'Missing required fields'}), 400
+
+    message = f"Sign this message to authenticate: {nonce}"
+    message_bytes = message.encode('utf-8')
+
+    try:
+        signature = base64.b64decode(signature_b64)
+        pubkey = base64.b64decode(pubkey_b64)
+
+        # Sui uses a flag byte (0 for Ed25519) before the signature in some cases,
+        # but pysui_fastcrypto.verify usually expects raw bytes.
+        # If the signature comes from window.suiWallet.signPersonalMessage,
+        # it might need parsing.
+
+        # Basic verification assuming Ed25519 (scheme 0)
+        is_valid = pysui_fastcrypto.verify(signature, message_bytes, pubkey, 0)
+        if not is_valid:
+            return jsonify({'message': 'Invalid Sui signature'}), 401
+    except Exception as e:
+        return jsonify({'message': f'Verification error: {str(e)}'}), 400
+
+    user = User.query.filter_by(sui_address=address).first()
+    if not user or user.nonce != nonce:
+        return jsonify({'message': 'Invalid nonce'}), 401
 
     token = jwt.encode({
         'user_id': user.id,
