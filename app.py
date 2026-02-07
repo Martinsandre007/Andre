@@ -6,11 +6,11 @@ from passlib.hash import sha256_crypt
 from fpdf import FPDF
 import jwt
 from functools import wraps
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your_secret_key' # Change this in a real app
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'mysql+pymysql://web_app_user:password@localhost/web_security_app')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default_secret_key')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -59,7 +59,9 @@ def register():
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
-    role = data.get('role', 'staff')
+    # Vulnerability fix: Role should not be settable by the user during registration.
+    # It should default to 'staff'. Admins can upgrade roles later.
+    role = 'staff'
 
     if not username or not password:
         return jsonify({'message': 'Username and password are required'}), 400
@@ -91,7 +93,7 @@ def login():
     token = jwt.encode({
         'user_id': user.id,
         'role': user.role,
-        'exp': datetime.utcnow() + timedelta(minutes=30)
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=30)
     }, app.config['SECRET_KEY'])
 
     return jsonify({'token': token})
@@ -108,7 +110,9 @@ def token_required(f):
 
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            current_user = User.query.get(data['user_id'])
+            current_user = db.session.get(User, data['user_id'])
+            if not current_user:
+                return jsonify({'message': 'User not found!'}), 401
         except:
             return jsonify({'message': 'Token is invalid!'}), 401
 
@@ -152,8 +156,7 @@ def check_transaction(transaction):
 
     # Rule 2: High frequency of transactions from a single user
     # (e.g., more than 5 transactions in the last hour)
-    from datetime import datetime, timedelta
-    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     recent_transactions = Transaction.query.filter(
         Transaction.user_id == transaction.user_id,
         Transaction.timestamp >= one_hour_ago
@@ -219,7 +222,7 @@ def update_flagged_transaction(current_user, id):
     if not new_status or new_status not in ['pending', 'resolved']:
         return jsonify({'message': 'Invalid status'}), 400
 
-    flagged = FlaggedTransaction.query.get(id)
+    flagged = db.session.get(FlaggedTransaction, id)
     if not flagged:
         return jsonify({'message': 'Flagged transaction not found'}), 404
 
@@ -251,7 +254,7 @@ def update_user(current_user, id):
     if not new_role or new_role not in ['admin', 'staff']:
         return jsonify({'message': 'Invalid role'}), 400
 
-    user = User.query.get(id)
+    user = db.session.get(User, id)
     if not user:
         return jsonify({'message': 'User not found'}), 404
 
@@ -314,22 +317,25 @@ def get_payroll_pdf(current_user):
 
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
+    # Deprecation fix: Using helvetica as Arial might not be available
+    pdf.set_font("helvetica", size=12)
 
-    pdf.cell(200, 10, txt="Payroll Report", ln=1, align="C")
+    # Deprecation fix: txt renamed to text, ln=1 to new_x="LMARGIN", new_y="NEXT"
+    pdf.cell(200, 10, text="Payroll Report", new_x="LMARGIN", new_y="NEXT", align="C")
 
-    pdf.cell(50, 10, txt="Username", border=1)
-    pdf.cell(50, 10, txt="Total Hours", border=1)
-    pdf.cell(50, 10, txt="Total Pay", border=1)
+    pdf.cell(50, 10, text="Username", border=1)
+    pdf.cell(50, 10, text="Total Hours", border=1)
+    pdf.cell(50, 10, text="Total Pay", border=1)
     pdf.ln()
 
     for user_id, data in payroll_data.items():
-        pdf.cell(50, 10, txt=data['username'], border=1)
-        pdf.cell(50, 10, txt=str(round(data['total_hours'], 2)), border=1)
-        pdf.cell(50, 10, txt=str(round(data['total_pay'], 2)), border=1)
+        pdf.cell(50, 10, text=data['username'], border=1)
+        pdf.cell(50, 10, text=str(round(data['total_hours'], 2)), border=1)
+        pdf.cell(50, 10, text=str(round(data['total_pay'], 2)), border=1)
         pdf.ln()
 
-    response = make_response(pdf.output(dest='S').encode('latin-1'))
+    # Bug fix: pdf.output() returns bytes/bytearray in fpdf2, no need to encode.
+    response = make_response(pdf.output())
     response.headers['Content-Type'] = 'application/pdf'
     response.headers['Content-Disposition'] = 'attachment; filename=payroll_report.pdf'
 
@@ -337,7 +343,11 @@ def get_payroll_pdf(current_user):
 
 @app.route('/api/transaction', methods=['POST'])
 def api_add_transaction():
-    # In a real app, you would add API key authentication here
+    # Implement simple API key authentication
+    api_key = request.headers.get('x-api-key')
+    if not api_key or api_key != os.environ.get('API_KEY', 'default_api_key'):
+        return jsonify({'message': 'Invalid or missing API key'}), 401
+
     data = request.get_json()
     amount = data.get('amount')
     location = data.get('location')

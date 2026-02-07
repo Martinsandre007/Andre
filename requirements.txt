@@ -1,0 +1,8 @@
+flask
+flask-sqlalchemy
+flask-migrate
+passlib
+fpdf2
+pyjwt
+pymysql
+cryptography
