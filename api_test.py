@@ -1,3 +1,4 @@
+import os
 import requests
 import json
 import time
@@ -11,9 +12,12 @@ def send_transaction():
         "amount": round(random.uniform(1, 20000), 2),
         "location": random.choice(["New York", "London", "Tokyo", "known_fraud_location_1"])
     }
+    headers = {
+        "x-api-key": os.environ.get('API_KEY', 'default_api_key')
+    }
 
     try:
-        response = requests.post(API_URL, json=transaction)
+        response = requests.post(API_URL, json=transaction, headers=headers)
         if response.status_code == 201:
             print(f"Successfully sent transaction: {transaction}")
         else:

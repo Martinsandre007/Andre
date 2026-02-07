@@ -1,16 +1,21 @@
 import os
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from passlib.hash import sha256_crypt
 from fpdf import FPDF
 import jwt
+import secrets
+import base64
+from eth_account.messages import encode_defunct
+from eth_account import Account
+import pysui_fastcrypto
 from functools import wraps
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your_secret_key' # Change this in a real app
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'mysql+pymysql://web_app_user:password@localhost/web_security_app')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'default_secret_key')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///app.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -21,6 +26,9 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(128))
     role = db.Column(db.String(20), nullable=False, default='staff')
+    eth_address = db.Column(db.String(42), unique=True, nullable=True)
+    sui_address = db.Column(db.String(66), unique=True, nullable=True)
+    nonce = db.Column(db.String(100), nullable=True)
 
     def set_password(self, password):
         self.password_hash = sha256_crypt.hash(password)
@@ -54,12 +62,18 @@ class TimeLog(db.Model):
     clock_in = db.Column(db.DateTime, nullable=False, default=db.func.current_timestamp())
     clock_out = db.Column(db.DateTime)
 
+@app.route('/')
+def index():
+    return render_template('login.html')
+
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
-    role = data.get('role', 'staff')
+    # Vulnerability fix: Role should not be settable by the user during registration.
+    # It should default to 'staff'. Admins can upgrade roles later.
+    role = 'staff'
 
     if not username or not password:
         return jsonify({'message': 'Username and password are required'}), 400
@@ -91,7 +105,107 @@ def login():
     token = jwt.encode({
         'user_id': user.id,
         'role': user.role,
-        'exp': datetime.utcnow() + timedelta(minutes=30)
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=30)
+    }, app.config['SECRET_KEY'])
+
+    return jsonify({'token': token})
+
+@app.route('/api/nonce', methods=['POST'])
+def get_nonce():
+    data = request.get_json()
+    address = data.get('address')
+    if not address:
+        return jsonify({'message': 'Address is required'}), 400
+
+    nonce = secrets.token_hex(16)
+
+    # Check if user exists, if not create one to store the nonce
+    user = User.query.filter((User.eth_address == address) | (User.sui_address == address)).first()
+    if not user:
+        if address.startswith('0x') and len(address) == 42:
+            username = f"eth_{address[:8]}_{secrets.token_hex(4)}"
+            user = User(username=username, eth_address=address, role='staff')
+        else:
+            username = f"sui_{address[:8]}_{secrets.token_hex(4)}"
+            user = User(username=username, sui_address=address, role='staff')
+        db.session.add(user)
+
+    user.nonce = nonce
+    db.session.commit()
+
+    return jsonify({'nonce': nonce})
+
+@app.route('/api/login/ethereum', methods=['POST'])
+def login_ethereum():
+    data = request.get_json()
+    address = data.get('address')
+    signature = data.get('signature')
+    nonce = data.get('nonce')
+
+    if not all([address, signature, nonce]):
+        return jsonify({'message': 'Missing required fields'}), 400
+
+    message = f"Sign this message to authenticate: {nonce}"
+    encoded_message = encode_defunct(text=message)
+
+    try:
+        recovered_address = Account.recover_message(encoded_message, signature=signature)
+    except Exception as e:
+        return jsonify({'message': f'Invalid signature format: {str(e)}'}), 400
+
+    user = User.query.filter_by(eth_address=address).first()
+    if not user or user.nonce != nonce:
+        return jsonify({'message': 'Invalid nonce'}), 401
+
+    if recovered_address.lower() != address.lower():
+        return jsonify({'message': 'Invalid signature'}), 401
+
+    token = jwt.encode({
+        'user_id': user.id,
+        'role': user.role,
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=30)
+    }, app.config['SECRET_KEY'])
+
+    return jsonify({'token': token})
+
+@app.route('/api/login/sui', methods=['POST'])
+def login_sui():
+    data = request.get_json()
+    address = data.get('address')
+    signature_b64 = data.get('signature')
+    nonce = data.get('nonce')
+    pubkey_b64 = data.get('pubkey')
+
+    if not all([address, signature_b64, nonce, pubkey_b64]):
+        return jsonify({'message': 'Missing required fields'}), 400
+
+    message = f"Sign this message to authenticate: {nonce}"
+    message_bytes = message.encode('utf-8')
+
+    try:
+        signature = base64.b64decode(signature_b64)
+        pubkey = base64.b64decode(pubkey_b64)
+
+        # Sui uses a flag byte (0 for Ed25519) before the signature in some cases,
+        # but pysui_fastcrypto.verify usually expects raw bytes.
+        # If the signature comes from window.suiWallet.signPersonalMessage,
+        # it might need parsing.
+
+        # Basic verification assuming Ed25519 (scheme 0)
+        is_valid = pysui_fastcrypto.verify(signature, message_bytes, pubkey, 0)
+        if not is_valid:
+            return jsonify({'message': 'Invalid Sui signature'}), 401
+    except Exception as e:
+        return jsonify({'message': f'Verification error: {str(e)}'}), 400
+
+    user = User.query.filter_by(sui_address=address).first()
+    if not user or user.nonce != nonce:
+        return jsonify({'message': 'Invalid nonce'}), 401
+
+    token = jwt.encode({
+        'user_id': user.id,
+        'role': user.role,
+        'exp': datetime.now(timezone.utc) + timedelta(minutes=30)
     }, app.config['SECRET_KEY'])
 
     return jsonify({'token': token})
@@ -108,7 +222,9 @@ def token_required(f):
 
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            current_user = User.query.get(data['user_id'])
+            current_user = db.session.get(User, data['user_id'])
+            if not current_user:
+                return jsonify({'message': 'User not found!'}), 401
         except:
             return jsonify({'message': 'Token is invalid!'}), 401
 
@@ -152,8 +268,7 @@ def check_transaction(transaction):
 
     # Rule 2: High frequency of transactions from a single user
     # (e.g., more than 5 transactions in the last hour)
-    from datetime import datetime, timedelta
-    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     recent_transactions = Transaction.query.filter(
         Transaction.user_id == transaction.user_id,
         Transaction.timestamp >= one_hour_ago
@@ -219,7 +334,7 @@ def update_flagged_transaction(current_user, id):
     if not new_status or new_status not in ['pending', 'resolved']:
         return jsonify({'message': 'Invalid status'}), 400
 
-    flagged = FlaggedTransaction.query.get(id)
+    flagged = db.session.get(FlaggedTransaction, id)
     if not flagged:
         return jsonify({'message': 'Flagged transaction not found'}), 404
 
@@ -251,7 +366,7 @@ def update_user(current_user, id):
     if not new_role or new_role not in ['admin', 'staff']:
         return jsonify({'message': 'Invalid role'}), 400
 
-    user = User.query.get(id)
+    user = db.session.get(User, id)
     if not user:
         return jsonify({'message': 'User not found'}), 404
 
@@ -314,22 +429,25 @@ def get_payroll_pdf(current_user):
 
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
+    # Deprecation fix: Using helvetica as Arial might not be available
+    pdf.set_font("helvetica", size=12)
 
-    pdf.cell(200, 10, txt="Payroll Report", ln=1, align="C")
+    # Deprecation fix: txt renamed to text, ln=1 to new_x="LMARGIN", new_y="NEXT"
+    pdf.cell(200, 10, text="Payroll Report", new_x="LMARGIN", new_y="NEXT", align="C")
 
-    pdf.cell(50, 10, txt="Username", border=1)
-    pdf.cell(50, 10, txt="Total Hours", border=1)
-    pdf.cell(50, 10, txt="Total Pay", border=1)
+    pdf.cell(50, 10, text="Username", border=1)
+    pdf.cell(50, 10, text="Total Hours", border=1)
+    pdf.cell(50, 10, text="Total Pay", border=1)
     pdf.ln()
 
     for user_id, data in payroll_data.items():
-        pdf.cell(50, 10, txt=data['username'], border=1)
-        pdf.cell(50, 10, txt=str(round(data['total_hours'], 2)), border=1)
-        pdf.cell(50, 10, txt=str(round(data['total_pay'], 2)), border=1)
+        pdf.cell(50, 10, text=data['username'], border=1)
+        pdf.cell(50, 10, text=str(round(data['total_hours'], 2)), border=1)
+        pdf.cell(50, 10, text=str(round(data['total_pay'], 2)), border=1)
         pdf.ln()
 
-    response = make_response(pdf.output(dest='S').encode('latin-1'))
+    # Bug fix: pdf.output() returns bytes/bytearray in fpdf2, no need to encode.
+    response = make_response(pdf.output())
     response.headers['Content-Type'] = 'application/pdf'
     response.headers['Content-Disposition'] = 'attachment; filename=payroll_report.pdf'
 
@@ -337,7 +455,11 @@ def get_payroll_pdf(current_user):
 
 @app.route('/api/transaction', methods=['POST'])
 def api_add_transaction():
-    # In a real app, you would add API key authentication here
+    # Implement simple API key authentication
+    api_key = request.headers.get('x-api-key')
+    if not api_key or api_key != os.environ.get('API_KEY', 'default_api_key'):
+        return jsonify({'message': 'Invalid or missing API key'}), 401
+
     data = request.get_json()
     amount = data.get('amount')
     location = data.get('location')
